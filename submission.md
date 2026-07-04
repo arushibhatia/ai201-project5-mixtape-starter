@@ -1,4 +1,4 @@
-# Submission Map
+# Codebase Map
 
 Here I will map out the organization and the structure of this codebase before attempting to even solve the bugs.
 
@@ -116,4 +116,56 @@ The interesting part: there's no notification when a song is *shared* in the fir
 - Services are grouped by side effect, not strictly by resource — notification_service.py owning add_to_playlist and rate_song is the clearest example (see data flow above).
 - Association tables carry more than the join — playlist_entries stores position, added_by, and added_at, which is how playlist ordering and "who added this" get tracked without a separate model.
 - Notifications have no delivery mechanism — "notify" always means "insert a Notification row," and the recipient finds out by polling GET /users/<id>/notifications. There's no websocket/push/email path in the codebase.
+
+## Root Cause Analysis
+
+### Issue #1 — My listening streak keeps resetting
+
+**How I reproduced it:** Ran `pytest tests/test_streaks.py` — `test_streak_increments_on_sunday` fails (`assert 1 == 2`). Confirmed independently by calling `update_listening_streak(user, saturday)` then `update_listening_streak(user, sunday)` with two fixed UTC datetimes (2024-06-15 Saturday → 2024-06-16 Sunday): streak stayed at 1 instead of advancing to 2. Also built a debug endpoint (`services/debug_service.py` + `routes/debugging.py`, gated behind `MIXTAPE_DEBUG_ROUTES=1`) that lets you POST a `date`/`days_ago` and simulate a listen on it, so this is reproducible live via curl on any two real dates, not just in a script. Condition needed: any two consecutive-day listens where the *second* day is a Sunday — every other day-of-week transition increments correctly.
+
+**How I found the root cause:**
+
+**The root cause:**
+
+**Fix and side-effect check:**
+
+### Issue #2 — Friends Listening Now shows people from yesterday
+
+**How I reproduced it:** Created two friended users and a song, then inserted a `ListeningEvent` for the friend timestamped `real_now - 23h30m`. That instant falls on the previous calendar date (e.g. real now `2026-07-04 23:04 UTC` → event at `2026-07-03 23:34 UTC`) but is still inside the 24-hour cutoff. Calling `get_friends_listening_now(user_id)` directly returned that friend/event — confirmed live against the actual system clock, no mocking needed. Condition needed: a friend's listening event that's under 24 hours old by wall-clock time but was logged on the previous calendar date — i.e. any listen from roughly the last 24 hours around a midnight boundary, viewed the next day.
+
+**How I found the root cause:**
+
+**The root cause:**
+
+**Fix and side-effect check:**
+
+### Issue #3 — The same song keeps showing up twice in search
+
+**How I attempted to reproduce it:** Ran `pytest tests/test_search.py` — all 5 tests **pass**, including `test_search_no_duplicates_multi_tag_song`, whose comment literally says "Should be 1, bug causes it to be 3." Reproduced the fixture manually too: created a song with 3 tags inserted directly into the `song_tags` join table (same pattern as the test/seed data), called `search_songs(...)`, got exactly 1 result — not 3. Checked the raw SQL directly against the DB (bypassing the ORM) and confirmed the join genuinely returns 3 physical rows at the SQLite level — but SQLAlchemy 2.0.51's `Query(Song).all()` deduplicates full-entity results by primary key before handing them back, so the fan-out never reaches `search_songs`'s caller. This is a *latent* bug: the underlying defect is real (see root cause below), but it isn't currently observable as the reported symptom in this dependency version, so I couldn't honestly claim to have triggered the visible behavior — only the structural cause that could produce it under a different SQLAlchemy version or query style.
+
+**How I found the root cause:**
+
+**The root cause:**
+
+**Fix and side-effect check:**
+
+### Issue #4 — Notified when a song is added to a playlist but not when it's rated
+
+**How I reproduced it:** Created a sharer and a separate rater, a song owned by the sharer, called `rate_song(rater.id, song.id, 5)`, then checked `get_notifications(sharer.id)` → returned `[]`. Repeating the same setup through `add_to_playlist` instead does produce a notification, which isolates the missing behavior specifically to `rate_song`. Condition needed: any user other than a song's sharer rates that song.
+
+**How I found the root cause:**
+
+**The root cause:**
+
+**Fix and side-effect check:**
+
+### Issue #5 — The last song in a playlist never shows up
+
+**How I reproduced it:** `pytest tests/test_playlists.py` — `test_playlist_returns_all_songs` and `test_playlist_returns_songs_in_order` both fail; a 5-song playlist returns only 4 (`Track 5` missing). Reproduced independently by creating a playlist, inserting 3 `playlist_entries` rows directly at positions 1-3, and calling `get_playlist_songs` — got back only positions 1-2. Condition needed: any playlist with at least one song — a single-song playlist returns an empty list, and an N-song playlist always drops the Nth.
+
+**How I found the root cause:**
+
+**The root cause:**
+
+**Fix and side-effect check:**
 
