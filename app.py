@@ -37,6 +37,10 @@ def create_app(config=None):
     app.register_blueprint(users_bp, url_prefix="/users")
     app.register_blueprint(feed_bp, url_prefix="/feed")
 
+    if os.environ.get("MIXTAPE_DEBUG_ROUTES") == "1":
+        from routes.debugging import debug_bp
+        app.register_blueprint(debug_bp, url_prefix="/debug")
+
     with app.app_context():
         db.create_all()
 
